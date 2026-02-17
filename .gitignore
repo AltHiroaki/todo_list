@@ -1,0 +1,23 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Distribution / Build
+dist/
+build/
+*.spec
+*.exe
+
+# User Data / Database
+data/
+*.db
+
+# Secrets (Never commit these!)
+credentials.json
+token.json
+
+# Environment
+.venv
+venv/
+ENV/
+env/
