@@ -60,4 +60,4 @@ SlideTasks_v1.0/
 
 ## ライセンス
 
-Private
+Private、つまり無いです。
