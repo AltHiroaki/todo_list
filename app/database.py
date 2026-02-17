@@ -44,8 +44,8 @@ def init_db():
             missing_cols = []
             if "due_date" not in column_names:
                 missing_cols.append("due_date")
-            if "google_calendar_event_id" not in column_names:
-                missing_cols.append("google_calendar_event_id")
+            if "due_date" not in column_names:
+                missing_cols.append("due_date")
                 
             if missing_cols:
                 # カラムが足りないのでリセット（開発中につき簡易対応）
@@ -176,17 +176,6 @@ def update_google_task_id(task_id: int, google_task_id: str):
     conn.execute(
         "UPDATE tasks SET google_task_id = ? WHERE id = ?",
         (google_task_id, task_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def update_google_calendar_event_id(task_id: int, event_id: str):
-    """Google Calendar Event ID を紐づける"""
-    conn = _get_connection()
-    conn.execute(
-        "UPDATE tasks SET google_calendar_event_id = ? WHERE id = ?",
-        (event_id, task_id),
     )
     conn.commit()
     conn.close()

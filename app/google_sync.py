@@ -28,16 +28,13 @@ CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
 TOKEN_FILE = os.path.join(BASE_DIR, "token.json")
 SCOPES = [
     "https://www.googleapis.com/auth/tasks",
-    "https://www.googleapis.com/auth/calendar",
 ]
 
 
 class GoogleTaskSync:
     def __init__(self):
         self.service = None
-        self.calendar_service = None
         self.tasklist_id = "@default"  # "My Tasks" は通常 @default
-        self.calendar_id = "primary"   # "primary" は通常メインカレンダー
 
     def is_available(self) -> bool:
         """Google 連携が利用可能か"""
@@ -66,7 +63,6 @@ class GoogleTaskSync:
                     f.write(creds.to_json())
 
             self.service = build("tasks", "v1", credentials=creds)
-            self.calendar_service = build("calendar", "v3", credentials=creds)
             return True
 
         except Exception as e:
@@ -74,7 +70,7 @@ class GoogleTaskSync:
             return False
 
     def _ensure_service(self) -> bool:
-        if self.service and self.calendar_service:
+        if self.service:
             return True
         return self.authenticate()
 
@@ -144,85 +140,6 @@ class GoogleTaskSync:
         except Exception as e:
             logger.error(f"Failed to add task: {e}")
             return None
-
-    def add_calendar_event(self, title: str, date_str: str) -> Optional[str]:
-        """
-        カレンダーに終日イベントを追加し、Event IDを返す
-        date_str: "YYYY-MM-DD"
-        """
-        if not self._ensure_service() or not date_str:
-            return None
-        
-        if self.calendar_service is None:
-            return None
-
-        try:
-            event: Dict = {
-                'summary': title,
-                'start': {
-                    'date': date_str,  # 終日イベント
-                },
-                'end': {
-                    'date': date_str,  # 終日イベント（同じ日を指定するとその日1日になる Google API 仕様）
-                },
-            }
-            
-            from datetime import datetime, timedelta
-            d = datetime.strptime(date_str, "%Y-%m-%d").date()
-            next_day = (d + timedelta(days=1)).isoformat()
-            
-            event['end']['date'] = next_day
-            
-            result = self.calendar_service.events().insert(
-                calendarId=self.calendar_id,
-                body=event
-            ).execute()
-            
-            return result.get('id')
-        except Exception as e:
-            logger.error(f"カレンダーイベントの追加に失敗しました: {e}")
-            return None
-
-    def check_calendar_deletions(self, tasks_with_events: List[Dict]) -> List[int]:
-        """
-        カレンダーイベントが存在するか確認し、
-        削除/キャンセルされていたら削除対象のタスクIDリストを返す。
-        tasks_with_events: [{'id': 1, 'google_calendar_event_id': '...'}, ...]
-        """
-        if not self._ensure_service():
-            return []
-            
-        if self.calendar_service is None:
-            return []
-            
-        deleted_task_ids = []
-        
-        for task in tasks_with_events:
-            tid = task['id']
-            eid = task['google_calendar_event_id']
-            if not eid:
-                continue
-                
-            try:
-                # イベント取得 (削除済みも取得できる場合があるが、404なら削除確定)
-                event = self.calendar_service.events().get(
-                    calendarId=self.calendar_id,
-                    eventId=eid
-                ).execute()
-                
-                # ステータス確認
-                if event.get('status') == 'cancelled':
-                    deleted_task_ids.append(tid)
-                    
-            except Exception as e:
-                # 404 Not Found など
-                # HttpError を正確にcatchすべきだが、ここでは簡易的に判定
-                if "404" in str(e):
-                    deleted_task_ids.append(tid)
-                else:
-                    logger.warning(f"イベント {eid} の確認に失敗しました: {e}")
-                    
-        return deleted_task_ids
 
     def complete_task(self, google_task_id: str) -> bool:
         """

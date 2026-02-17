@@ -524,9 +524,6 @@ class SyncWorker(QObject):
         if not google_sync.authenticate():
             return
 
-        # 1. カレンダー側で削除されたものを検知して同期
-        self._sync_calendar_deletions()
-
         # 2. Tasks 同期
         self._pull_from_google()
         self._push_missing_to_google()
@@ -534,34 +531,7 @@ class SyncWorker(QObject):
 
     def _sync_calendar_deletions(self):
         """カレンダーで削除されたイベントに対応するタスクを削除"""
-        conn = db._get_connection()
-        # カレンダー連携しており、かつ未完了のタスク
-        rows = conn.execute(
-            "SELECT id, google_calendar_event_id, google_task_id FROM tasks WHERE google_calendar_event_id IS NOT NULL"
-        ).fetchall()
-        conn.close()
-        
-        tasks_to_check = [dict(r) for r in rows]
-        if not tasks_to_check:
-            return
-            
-        deleted_ids = google_sync.check_calendar_deletions(tasks_to_check)
-        
-        if deleted_ids:
-            # 削除実行
-            for tid in deleted_ids:
-                # DBからタスク情報を取得（Google Task IDが必要）
-                # tasks_to_check から探す
-                target = next((t for t in tasks_to_check if t['id'] == tid), None)
-                if target:
-                    # Google Tasks からも削除
-                    if target['google_task_id']:
-                        google_sync.delete_task(target['google_task_id'])
-                        
-                    # ローカル削除
-                    db.delete_task(tid)
-            
-            # 変更通知は initial_sync の最後で emit
+        pass # Discontinued
 
     def poll_tasks(self):
         """定期ポーリング"""
@@ -581,11 +551,8 @@ class SyncWorker(QObject):
         if gid:
             db.update_google_task_id(task_id, gid)
             
-        # カレンダー連携: 期限がある場合のみ
-        if due_date:
-            eid = google_sync.add_calendar_event(title, due_date)
-            if eid:
-                db.update_google_calendar_event_id(task_id, eid)
+        if gid:
+            db.update_google_task_id(task_id, gid)
 
     def push_toggle(self, task_id: int, is_done: bool):
         """完了状態をPush"""

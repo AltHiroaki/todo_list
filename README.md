@@ -24,7 +24,7 @@ Windows常駐型・スライド式TODOアプリケーション。
 本アプリは Google Tasks と同期する機能を持っていますが、セキュリティの関係上、**認証情報は各自で用意していただく必要があります**。
 
 1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作成します。
-2. **Google Tasks API** と **Google Calendar API** を有効化します。
+2. **Google Tasks API** を有効化します。
 3. **OAuth 2.0 クライアントID**（アプリケーションの種類: デスクトップアプリ）を作成します。
 4. JSON形式で認証情報をダウンロードし、ファイル名を `credentials.json` に変更します。
 5. `SlideTasks.exe` と同じフォルダ（`SlideTasks_v1.0` フォルダ内）に `credentials.json` を配置します。
