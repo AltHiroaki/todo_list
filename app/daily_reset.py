@@ -38,8 +38,7 @@ def initialize(current_date: date | None = None):
 
 
 def _perform_reset(yesterday: date):
-    """前日の記録を保存し、完了タスクをアーカイブする"""
+    """前日の記録を保存する"""
     total, done = db.get_today_stats()
     if total > 0:
         db.save_daily_log(yesterday, total, done)
-    db.archive_completed_tasks()

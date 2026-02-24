@@ -29,7 +29,6 @@ BORDER_SUBTLE = "#1f1f38"    # 微細ボーダー
 BORDER_GLOW = "#8b5cf640"    # グロー付きボーダー
 
 DANGER = "#ef4444"
-DANGER_HOVER = "#dc2626"
 
 SCROLLBAR_BG = "transparent"
 SCROLLBAR_HANDLE = "#2a2a45"
@@ -114,6 +113,52 @@ QLineEdit#taskInput:focus {{
     border: 1px solid {ACCENT};
     background-color: {BG_TERTIARY};
 }}
+QPushButton#refreshButton,
+QPushButton#dueButton {{
+    background-color: rgba(139, 92, 246, 0.1);
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 0px;
+}}
+QPushButton#refreshButton {{
+    min-width: 24px;
+    max-width: 24px;
+}}
+QPushButton#dueButton {{
+    min-width: 72px;
+    max-width: 86px;
+    color: #e2e8f0;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 0px 8px;
+}}
+QPushButton#refreshButton:hover,
+QPushButton#dueButton:hover {{
+    background-color: rgba(139, 92, 246, 0.2);
+    border-color: {ACCENT};
+}}
+QPushButton#refreshButton:pressed,
+QPushButton#dueButton:pressed {{
+    background-color: rgba(139, 92, 246, 0.28);
+    border-color: {ACCENT_GLOW};
+}}
+QPushButton#dueButton[dueSelected="false"] {{
+    padding: 0px;
+}}
+QPushButton#dueButton[dueSelected="true"] {{
+    background-color: rgba(139, 92, 246, 0.36);
+    border-color: {ACCENT_GLOW};
+}}
+QPushButton#dueButton[dueOverdue="true"] {{
+    background-color: rgba(239, 68, 68, 0.16);
+    border-color: rgba(239, 68, 68, 0.48);
+    color: #fecaca;
+}}
+QPushButton#refreshButton:disabled,
+QPushButton#dueButton:disabled {{
+    background-color: rgba(139, 92, 246, 0.06);
+    border-color: {BORDER_SUBTLE};
+}}
 
 /* ── カウンターラベル ── */
 QLabel#counterLabel {{
@@ -162,10 +207,17 @@ QFrame#taskItem:hover {{
     background-color: {SURFACE};
     border: 1px solid {BORDER};
 }}
+QFrame#taskItem[selected="true"] {{
+    background-color: #2d2d4d;
+    border: 1px solid {ACCENT};
+}}
 QFrame#taskItemDone {{
     background-color: {BG_INPUT};
     border: 1px solid {BORDER_SUBTLE};
     border-radius: 10px;
+}}
+QFrame#taskItemDone[selected="true"] {{
+    border: 1px solid {ACCENT_DEEP};
 }}
 
 /* ── チェックボックス ── */
@@ -203,24 +255,10 @@ QLabel#taskTitleDone {{
     font-style: italic;
     padding: 2px 0px;
 }}
-
-/* ── 削除ボタン ── */
-QPushButton#deleteButton {{
-    background: transparent;
-    color: {TEXT_MUTED};
-    border: none;
-    border-radius: 6px;
+QLabel#taskNotes {{
+    color: #cbd5e1;
     font-size: 11px;
-    padding: 4px 6px;
-    font-weight: 500;
-}}
-QPushButton#deleteButton:hover {{
-    background-color: rgba(239, 68, 68, 0.15);
-    color: {DANGER};
-}}
-QPushButton#deleteButton:pressed {{
-    background-color: rgba(239, 68, 68, 0.25);
-    color: {DANGER_HOVER};
+    padding-top: 2px;
 }}
 
 /* ── プログレスバー ── */
@@ -239,6 +277,18 @@ QProgressBar::chunk {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
         stop:0 {GRADIENT_START}, stop:1 {GRADIENT_END});
     border-radius: 7px;
+}}
+QProgressBar#syncProgress {{
+    min-height: 3px;
+    max-height: 3px;
+    border: none;
+    border-radius: 0px;
+    background-color: rgba(255, 255, 255, 0.06);
+}}
+QProgressBar#syncProgress::chunk {{
+    border-radius: 0px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {ACCENT}, stop:1 {ACCENT_GLOW});
 }}
 
 /* ── フッターボタン ── */
@@ -299,10 +349,6 @@ QLabel#emptyLabel {{
     font-size: 13px;
     font-weight: 400;
     padding: 30px 10px;
-}}
-QLabel#emptyIcon {{
-    font-size: 32px;
-    padding: 10px;
 }}
 
 /* ── ツールチップ ── */

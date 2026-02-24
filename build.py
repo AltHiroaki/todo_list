@@ -1,10 +1,10 @@
 import os
 import shutil
 import subprocess
-import time
 
-def build():
-    # 1. PyInstallerの実行
+
+def build() -> None:
+    # 1) Build a single-file executable.
     print("Running PyInstaller...")
     subprocess.run([
         "pyinstaller",
@@ -14,7 +14,7 @@ def build():
         "main.py"
     ], check=True)
 
-    # 2. 配布用フォルダの作成
+    # 2) Prepare release directory.
     dist_dir = "dist"
     release_dir = os.path.join(dist_dir, "SlideTasks_v1.0")
     
@@ -23,8 +23,7 @@ def build():
     os.makedirs(release_dir)
     print(f"Created release directory: {release_dir}")
 
-    # 3. ファイルコピー
-    # SlideTasks.exe
+    # 3) Copy runtime files.
     exe_source = os.path.join(dist_dir, "SlideTasks.exe")
     exe_dest = os.path.join(release_dir, "SlideTasks.exe")
     if os.path.exists(exe_source):
@@ -34,24 +33,22 @@ def build():
         print("Error: SlideTasks.exe not found!")
         return
 
-    # credentials.json
     if os.path.exists("credentials.json"):
         shutil.copy("credentials.json", os.path.join(release_dir, "credentials.json"))
         print("Copied credentials.json")
     else:
         print("Warning: credentials.json not found.")
 
-    # README.md
     if os.path.exists("README.md"):
         shutil.copy("README.md", os.path.join(release_dir, "README.md"))
         print("Copied README.md")
 
-    # 4. データフォルダ作成
+    # 4) Create writable app data directory.
     data_dir = os.path.join(release_dir, "data")
     os.makedirs(data_dir, exist_ok=True)
     print("Created data directory")
 
-    # 5. クリーンアップ
+    # 5) Cleanup build artifacts.
     print("Cleaning up...")
     if os.path.exists("build"):
         shutil.rmtree("build")

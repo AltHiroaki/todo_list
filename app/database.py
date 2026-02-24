@@ -1,21 +1,25 @@
-"""
-SlideTasks — SQLite データベース操作
-tasks テーブルと daily_logs テーブルの CRUD を提供する。
+"""SQLite storage for SlideTasks.
+
+This module intentionally keeps a small API surface used by the UI and sync worker.
+Google Tasks remains the source of truth, while SQLite stores UI-friendly local state.
 """
 
-import sqlite3
+from __future__ import annotations
+
 import os
-from datetime import datetime, date
-
+import sqlite3
+from datetime import date, datetime
 
 from app.utils import get_base_path
 
 DB_DIR = os.path.join(get_base_path(), "data")
 DB_PATH = os.path.join(DB_DIR, "slidetasks.db")
+DEFAULT_TASKLIST_ID = "@default"
+
+_current_tasklist_id = DEFAULT_TASKLIST_ID
 
 
 def _get_connection() -> sqlite3.Connection:
-    """DB接続を取得（ディレクトリがなければ作成）"""
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -24,38 +28,25 @@ def _get_connection() -> sqlite3.Connection:
     return conn
 
 
+def set_current_tasklist(tasklist_id: str):
+    global _current_tasklist_id
+    _current_tasklist_id = tasklist_id or DEFAULT_TASKLIST_ID
+
+
+def get_current_tasklist() -> str:
+    return _current_tasklist_id
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str):
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
 
 def init_db():
-    """テーブルを初期化する"""
     conn = _get_connection()
-    
-    # マイグレーション: due_date カラムがない場合は reset_all_data を呼ぶためのチェック
-    try:
-        # tasks テーブルがあるか確認
-        table_exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'"
-        ).fetchone()
-        
-        if table_exists:
-            # due_date カラムがあるか確認
-            columns = conn.execute("PRAGMA table_info(tasks)").fetchall()
-            column_names = [col["name"] for col in columns]
-            
-            missing_cols = []
-            if "due_date" not in column_names:
-                missing_cols.append("due_date")
-            if "due_date" not in column_names:
-                missing_cols.append("due_date")
-                
-            if missing_cols:
-                # カラムが足りないのでリセット（開発中につき簡易対応）
-                conn.close()
-                reset_all_data()
-                return
-    except Exception:
-        pass
-
-    conn.executescript("""
+    conn.executescript(
+        """
         CREATE TABLE IF NOT EXISTS tasks (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             title           TEXT    NOT NULL,
@@ -64,7 +55,10 @@ def init_db():
             completed_at    TEXT,
             google_task_id  TEXT,
             due_date        TEXT,
-            google_calendar_event_id TEXT
+            tasklist_id     TEXT    NOT NULL DEFAULT '@default',
+            google_position TEXT,
+            parent_google_id TEXT,
+            notes           TEXT
         );
         CREATE TABLE IF NOT EXISTS daily_logs (
             date             TEXT PRIMARY KEY,
@@ -72,31 +66,45 @@ def init_db():
             done_count       INTEGER NOT NULL DEFAULT 0,
             achievement_rate REAL    NOT NULL DEFAULT 0.0
         );
-    """)
+        """
+    )
+    _ensure_column(conn, "tasks", "tasklist_id", "TEXT NOT NULL DEFAULT '@default'")
+    _ensure_column(conn, "tasks", "google_position", "TEXT")
+    _ensure_column(conn, "tasks", "parent_google_id", "TEXT")
+    _ensure_column(conn, "tasks", "notes", "TEXT")
+    conn.execute("UPDATE tasks SET tasklist_id = ? WHERE tasklist_id IS NULL OR tasklist_id = ''", (DEFAULT_TASKLIST_ID,))
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_tasklist ON tasks(tasklist_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_tasklist_google ON tasks(tasklist_id, google_task_id)")
     conn.commit()
     conn.close()
 
 
 def reset_all_data():
-    """全データを削除し、テーブルを再作成する（開発用）"""
     conn = _get_connection()
-    conn.executescript("""
+    conn.executescript(
+        """
         DROP TABLE IF EXISTS tasks;
         DROP TABLE IF EXISTS daily_logs;
-    """)
+        """
+    )
     conn.close()
     init_db()
 
 
-# ── タスク CRUD ────────────────────────────────────────
-
-def add_task(title: str, due_date: str | None = None) -> dict:
-    """タスクを追加し、追加した行を辞書で返す"""
+def add_task(
+    title: str,
+    due_date: str | None = None,
+    tasklist_id: str | None = None,
+    created_at: str | None = None,
+    completed_at: str | None = None,
+    is_done: int = 0,
+) -> dict:
     conn = _get_connection()
-    now = datetime.now().isoformat()
+    tasklist_id = tasklist_id or get_current_tasklist()
+    created_at = created_at or datetime.now().isoformat()
     cur = conn.execute(
-        "INSERT INTO tasks (title, is_done, created_at, due_date) VALUES (?, 0, ?, ?)",
-        (title, now, due_date),
+        "INSERT INTO tasks (title, is_done, created_at, completed_at, due_date, tasklist_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (title, is_done, created_at, completed_at, due_date, tasklist_id),
     )
     task_id = cur.lastrowid
     conn.commit()
@@ -106,12 +114,12 @@ def add_task(title: str, due_date: str | None = None) -> dict:
 
 
 def toggle_done(task_id: int) -> dict:
-    """完了 ↔ 未完了をトグルし、更新後の行を返す"""
     conn = _get_connection()
     row = conn.execute("SELECT is_done FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         conn.close()
         raise ValueError(f"Task {task_id} not found")
+
     new_done = 0 if row["is_done"] else 1
     completed_at = datetime.now().isoformat() if new_done else None
     conn.execute(
@@ -124,65 +132,121 @@ def toggle_done(task_id: int) -> dict:
     return dict(updated)
 
 
-def delete_task(task_id: int):
-    """タスクを削除する"""
-    conn = _get_connection()
-    conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    conn.commit()
-    conn.close()
-
-
 def get_active_tasks() -> list[dict]:
-    """今日作成された or 未完了のタスクを返す（完了タスクも含む）"""
     conn = _get_connection()
     today_str = date.today().isoformat()
+    current_tasklist = get_current_tasklist()
     rows = conn.execute(
-        """SELECT * FROM tasks
-           WHERE is_done = 0
-              OR (is_done = 1 AND date(created_at) = ?)
-           ORDER BY is_done ASC, due_date ASC, id ASC""",
-        (today_str,),
+        """
+        SELECT * FROM tasks
+        WHERE tasklist_id = ?
+          AND (
+               is_done = 0
+           OR (is_done = 1 AND date(created_at) = ?)
+          )
+        ORDER BY is_done ASC,
+                 CASE WHEN google_position IS NULL THEN 1 ELSE 0 END ASC,
+                 google_position ASC,
+                 due_date ASC,
+                 id ASC
+        """,
+        (current_tasklist, today_str),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [dict(row) for row in rows]
 
 
 def get_today_tasks() -> list[dict]:
-    """今日のアクティブなタスク（未完了 + 今日完了したもの）を全て返す"""
     conn = _get_connection()
-    today_str = date.today().isoformat()
+    current_tasklist = get_current_tasklist()
     rows = conn.execute(
-        """SELECT * FROM tasks
-           WHERE is_done = 0
-              OR (is_done = 1 AND date(completed_at) >= ?)
-           ORDER BY is_done ASC, due_date ASC, id ASC""",
-        (today_str,),
+        """
+        SELECT * FROM tasks
+        WHERE tasklist_id = ?
+          AND (
+               is_done = 0
+           OR (is_done = 1 AND substr(completed_at, 1, 10) = date('now', 'localtime'))
+          )
+        ORDER BY is_done ASC,
+                 CASE WHEN google_position IS NULL THEN 1 ELSE 0 END ASC,
+                 google_position ASC,
+                 due_date ASC,
+                 id ASC
+        """
+        ,
+        (current_tasklist,),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [dict(row) for row in rows]
+
+
+def get_all_tasks(tasklist_id: str | None = None) -> list[dict]:
+    effective_tasklist = tasklist_id or get_current_tasklist()
+    conn = _get_connection()
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE tasklist_id = ? ORDER BY id ASC",
+        (effective_tasklist,),
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 def get_today_stats() -> tuple[int, int]:
-    """(総タスク数, 完了タスク数) を返す"""
     tasks = get_today_tasks()
-    total = len(tasks)
-    done = sum(1 for t in tasks if t["is_done"])
+    today_str = date.today().isoformat()
+
+    total = 0
+    done = 0
+    for item in tasks:
+        if item["is_done"]:
+            done += 1
+            total += 1
+        else:
+            if not item["due_date"] or item["due_date"] <= today_str:
+                total += 1
+
     return total, done
 
 
 def update_google_task_id(task_id: int, google_task_id: str):
-    """Google Tasks の ID を紐づける"""
+    conn = _get_connection()
+    conn.execute("UPDATE tasks SET google_task_id = ? WHERE id = ?", (google_task_id, task_id))
+    conn.commit()
+    conn.close()
+
+
+def update_due_date(task_id: int, due_date: str | None):
+    conn = _get_connection()
+    conn.execute("UPDATE tasks SET due_date = ? WHERE id = ?", (due_date, task_id))
+    conn.commit()
+    conn.close()
+
+
+def update_task_title(task_id: int, new_title: str):
+    conn = _get_connection()
+    conn.execute("UPDATE tasks SET title = ? WHERE id = ?", (new_title, task_id))
+    conn.commit()
+    conn.close()
+
+
+def update_task_notes(task_id: int, notes: str):
+    conn = _get_connection()
+    conn.execute("UPDATE tasks SET notes = ? WHERE id = ?", (notes, task_id))
+    conn.commit()
+    conn.close()
+
+
+def update_task_details(task_id: int, title: str, due_date: str | None, notes: str):
     conn = _get_connection()
     conn.execute(
-        "UPDATE tasks SET google_task_id = ? WHERE id = ?",
-        (google_task_id, task_id),
+        "UPDATE tasks SET title = ?, due_date = ?, notes = ? WHERE id = ?",
+        (title, due_date, notes, task_id),
     )
     conn.commit()
     conn.close()
 
 
 def get_google_task_id(task_id: int) -> str | None:
-    """タスクIDからGoogle Task IDを取得する"""
     conn = _get_connection()
     row = conn.execute("SELECT google_task_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
     conn.close()
@@ -190,196 +254,136 @@ def get_google_task_id(task_id: int) -> str | None:
 
 
 def get_tasks_for_date(target_date: date) -> list[dict]:
-    """
-    指定した日付のアクティビティ（作成 or 完了）を取得する。
-    - その日に完了したタスク
-    - その日に作成されたタスク
-    ※以前はバックログ（未完了タスク全て）を表示していたが、
-      「複数の日付が混入」という指摘を受け、その日に動きがあったものだけに限定する。
-    """
     conn = _get_connection()
-    t_str = target_date.isoformat()
-    
-    # 1. その日に完了したタスク OR その日に作成されたタスク
+    target = target_date.isoformat()
+    current_tasklist = get_current_tasklist()
     rows = conn.execute(
         """
-        SELECT * FROM tasks 
-        WHERE date(created_at) = ?
+        SELECT * FROM tasks
+        WHERE tasklist_id = ?
+          AND (
+               date(created_at) = ?
            OR (is_done = 1 AND date(completed_at) = ?)
+          )
         """,
-        (t_str, t_str)
+        (current_tasklist, target, target),
     ).fetchall()
-    
     conn.close()
-    
-    results = []
-    for r in rows:
-        d = dict(r)
-        # その日時点でのステータスを判定
-        # 完了日がその日なら done, そうでなければ（作成されただけなら） active
-        if d['is_done'] and d['completed_at'] and d['completed_at'].startswith(t_str):
-            d['_status_on_date'] = 'done'
+
+    results: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        if item["is_done"] and item["completed_at"] and item["completed_at"].startswith(target):
+            item["_status_on_date"] = "done"
         else:
-            d['_status_on_date'] = 'active'
-        results.append(d)
-        
-    return sorted(results, key=lambda x: x['id'])
+            item["_status_on_date"] = "active"
+        results.append(item)
+
+    return sorted(results, key=lambda x: x["id"])
 
 
-def get_aggregated_logs(period: str = 'month') -> list[dict]:
-    """
-    指定期間ごとのログを集計して返す
-    period: 'week' (直近7日), 'month' (直近30日), 'year' (直近12ヶ月 - 月単位集計)
-    """
+def recalc_stats_for_date(target_date: date) -> dict:
     conn = _get_connection()
-    
-    if period == 'year':
-        # 月ごとの集計
-        # last 12 months
-        rows = conn.execute(
-            """
-            SELECT 
-                strftime('%Y-%m', date) as month,
-                SUM(total_count) as total,
-                SUM(done_count) as done
-            FROM daily_logs
-            WHERE date >= date('now', '-12 months', 'start of month')
-            GROUP BY month
-            ORDER BY month DESC
-            """
-        ).fetchall()
-        
-        result = []
-        for r in rows:
-            t = r['total']
-            d = r['done']
-            rate = (d / t * 100) if t > 0 else 0
-            result.append({
-                'date': r['month'], # "2023-10"
-                'total_count': t,
-                'done_count': d,
-                'achievement_rate': rate
-            })
-        conn.close()
-        return result
+    target = target_date.isoformat()
+    current_tasklist = get_current_tasklist()
+    rows = conn.execute(
+        """
+        SELECT is_done, completed_at FROM tasks
+        WHERE tasklist_id = ?
+          AND (
+               date(created_at) = ?
+           OR (is_done = 1 AND date(completed_at) = ?)
+          )
+        """,
+        (current_tasklist, target, target),
+    ).fetchall()
+    conn.close()
 
-    else:
-        # 日ごとのデータ (week=7, month=30)
-        limit = 7 if period == 'week' else 30
-        rows = conn.execute(
-            """SELECT * FROM daily_logs
-               ORDER BY date DESC
-               LIMIT ?""",
-            (limit,),
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
+    total = len(rows)
+    done = 0
+    for row in rows:
+        if row["is_done"] and row["completed_at"] and row["completed_at"].startswith(target):
+            done += 1
+
+    rate = (done / total * 100) if total > 0 else 0.0
+    return {
+        "date": target,
+        "total_count": total,
+        "done_count": done,
+        "achievement_rate": rate,
+    }
 
 
 def get_logs_in_range(start_date: date, end_date: date) -> list[dict]:
-    """指定期間（開始日〜終了日）のログを全て返す"""
     conn = _get_connection()
     rows = conn.execute(
-        """SELECT * FROM daily_logs
-           WHERE date >= ? AND date <= ?
-           ORDER BY date DESC""",
+        """
+        SELECT * FROM daily_logs
+        WHERE date >= ? AND date <= ?
+        ORDER BY date DESC
+        """,
         (start_date.isoformat(), end_date.isoformat()),
     ).fetchall()
     conn.close()
-    try:
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
+    return [dict(row) for row in rows]
 
 
 def get_yearly_stats(year: int) -> list[dict]:
-
-    """指定年の月別集計を返す（1月〜12月）"""
     conn = _get_connection()
-    
-    # 1. 1〜12月の枠を作成
-    monthly_data = {
-        f"{year}-{month:02d}": {"total": 0, "done": 0} 
-        for month in range(1, 13)
-    }
 
+    monthly = {f"{year}-{month:02d}": {"total": 0, "done": 0} for month in range(1, 13)}
     start_date = f"{year}-01-01"
     end_date = f"{year}-12-31"
 
     rows = conn.execute(
         """
-        SELECT 
-            strftime('%Y-%m', date) as month,
-            SUM(total_count) as total,
-            SUM(done_count) as done
+        SELECT
+            strftime('%Y-%m', date) AS month,
+            SUM(total_count) AS total,
+            SUM(done_count) AS done
         FROM daily_logs
         WHERE date >= ? AND date <= ?
         GROUP BY month
         """,
-        (start_date, end_date)
+        (start_date, end_date),
     ).fetchall()
     conn.close()
 
-    # 2. 取得したデータを枠に埋める
-    for r in rows:
-        m = r['month']
-        if m in monthly_data:
-            monthly_data[m]['total'] = r['total'] if r['total'] else 0
-            monthly_data[m]['done'] = r['done'] if r['done'] else 0
+    for row in rows:
+        month = row["month"]
+        if month in monthly:
+            monthly[month]["total"] = row["total"] or 0
+            monthly[month]["done"] = row["done"] or 0
 
     result = []
-    # UI側で reverse して表示しているので、ここでは DESC (新しい順: 12月 -> 1月) で返す
-    months_desc = sorted(monthly_data.keys(), reverse=True)
-    
-    for month_str in months_desc:
-        data = monthly_data[month_str]
-        t = data['total']
-        d = data['done']
-        rate = (d / t * 100) if t > 0 else 0
-        result.append({
-            'date': month_str,
-            'total_count': t,
-            'done_count': d,
-            'achievement_rate': rate
-        })
-        
+    for month in sorted(monthly.keys(), reverse=True):
+        total = monthly[month]["total"]
+        done = monthly[month]["done"]
+        rate = (done / total * 100) if total > 0 else 0
+        result.append(
+            {
+                "date": month,
+                "total_count": total,
+                "done_count": done,
+                "achievement_rate": rate,
+            }
+        )
     return result
 
 
-# ── 日次ログ ───────────────────────────────────────────
-
 def save_daily_log(target_date: date, total: int, done: int):
-    """指定日の日次ログを保存（UPSERT）"""
     rate = (done / total * 100) if total > 0 else 0.0
     conn = _get_connection()
     conn.execute(
-        """INSERT INTO daily_logs (date, total_count, done_count, achievement_rate)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(date) DO UPDATE SET
-               total_count = excluded.total_count,
-               done_count  = excluded.done_count,
-               achievement_rate = excluded.achievement_rate""",
+        """
+        INSERT INTO daily_logs (date, total_count, done_count, achievement_rate)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(date) DO UPDATE SET
+            total_count = excluded.total_count,
+            done_count = excluded.done_count,
+            achievement_rate = excluded.achievement_rate
+        """,
         (target_date.isoformat(), total, done, rate),
     )
     conn.commit()
     conn.close()
-
-
-def get_logs(days: int = 30) -> list[dict]:
-    """直近 N 日間のログを返す"""
-    conn = _get_connection()
-    rows = conn.execute(
-        """SELECT * FROM daily_logs
-           ORDER BY date DESC
-           LIMIT ?""",
-        (days,),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def archive_completed_tasks():
-    """完了済みタスクを非表示（削除）にする。日次リセットで呼ぶ。"""
-    # 履歴機能のために削除しないように変更
-    pass
-

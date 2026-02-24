@@ -1,151 +1,131 @@
-"""
-SlideTasks — メインウィンドウ
-フレームレス常駐型ウィンドウ + スライドアニメーション。
-格納時は透明な小さいホバーゾーン (36×60px) のみ。
-マウスが近づくと矢印がフェードイン → クリックでパネル展開。
-"""
+"""Main application window for SlideTasks."""
 
-from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QPushButton, QProgressBar, QLabel, QApplication,
-    QSizePolicy, QFrame, QSystemTrayIcon, QMenu,
-)
-from PyQt6.QtCore import (
-    Qt, QPropertyAnimation, QEasingCurve, QTimer, QSize, QPoint,
-    pyqtProperty, QEvent,
-)
-from PyQt6.QtGui import (
-    QAction,
-    QColor,
-    QCursor,
-    QDesktopServices,
-    QIcon,
-    QPainter,
-    QPen,
-    QRegion,
-    QScreen, QFont, QPixmap, QBrush,
-)
+from __future__ import annotations
 
+import logging
 from datetime import date
 
-from app.styles import MAIN_STYLESHEET
-from app.task_widget import TaskListWidget
-from app.history_window import HistoryWindow
-from app import database as db
+from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QThread, QTimer, Qt, pyqtProperty, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QRegion
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QProgressBar,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
+
 from app import daily_reset
 from app import startup
-
-
-# ── 定数 ──────────────────────────────────────────────
-TRIGGER_WIDTH = 36         # ホバーゾーン幅
-TRIGGER_HEIGHT = 60        # ホバーゾーン高さ
-EXPANDED_WIDTH = 340       # 展開モード幅
-ANIMATION_DURATION = 300   # スライドアニメーション ms
-WINDOW_HEIGHT_RATIO = 0.85 # 展開時の画面高さ割合
-DAILY_CHECK_INTERVAL = 60_000
-
-# ── トグルボタンのスタイル ──
-_TOGGLE_IDLE = """
-    QPushButton#toggleButton {
-        background: rgba(139, 92, 246, 0.15);
-        color: rgba(255, 255, 255, 0.25);
-        border: none;
-        border-top-left-radius: 8px;
-        border-bottom-left-radius: 8px;
-        border-top-right-radius: 0px;
-        border-bottom-right-radius: 0px;
-        font-size: 13px;
-        font-weight: 600;
-    }
-"""
-_TOGGLE_HOVER = """
-    QPushButton#toggleButton {
-        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-            stop:0 #8b5cf6, stop:0.5 #6d28d9, stop:1 #4c1d95);
-        color: rgba(255, 255, 255, 0.95);
-        border: none;
-        border-top-left-radius: 8px;
-        border-bottom-left-radius: 8px;
-        border-top-right-radius: 0px;
-        border-bottom-right-radius: 0px;
-        font-size: 14px;
-        font-weight: 600;
-    }
-"""
-_TOGGLE_EXPANDED = """
-    QPushButton#toggleButton {
-        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-            stop:0 #8b5cf6, stop:0.5 #6d28d9, stop:1 #4c1d95);
-        color: rgba(255, 255, 255, 0.95);
-        border: none;
-        border-radius: 0px;
-        font-size: 14px;
-        font-weight: 600;
-    }
-"""
+from app import database as db
+from app.application.usecases.complete_with_undo import CompleteWithUndoUseCase
+from app.domain.models import AppSyncState
+from app.google_sync import google_sync
+from app.styles import MAIN_STYLESHEET
+from app.sync_worker import SyncWorker
+from app.ui.task_list import TaskListWidget
+from app.ui.widgets.error_overlay import ErrorOverlay
+from app.ui.windows.completed_log_window import CompletedLogWindow
+from app.ui.windows.main_window_constants import (
+    ANIMATION_DURATION_MS,
+    DAILY_CHECK_INTERVAL_MS,
+    HOVER_EXPAND_DELAY_MS,
+    MAX_PANEL_WIDTH,
+    MIN_PANEL_WIDTH,
+    POLL_INTERVAL_MS,
+    RESIZE_MARGIN,
+    TOGGLE_EXPANDED_STYLESHEET,
+    TOGGLE_HOVER_STYLESHEET,
+    TOGGLE_IDLE_STYLESHEET,
+    TRIGGER_WIDTH,
+    WINDOW_HEIGHT_RATIO,
+)
+from app.ui.windows.main_window_state_store import MainWindowState, MainWindowStateStore
+from app.ui.windows.tray_controller import TrayCallbacks, TrayController
 
 
 class MainWindow(QMainWindow):
-    """常駐型スライドウィンドウ"""
+    """Right-edge slide panel host with tray + background sync orchestration."""
+
+    global_hotkey_activated = pyqtSignal()
+    request_initial_sync = pyqtSignal()
+    request_poll_sync = pyqtSignal()
+    request_add_task = pyqtSignal(str, str)
+    request_update_task = pyqtSignal(int, str, object, str)
+    request_toggle_task = pyqtSignal(int, bool)
 
     def __init__(self):
         super().__init__()
 
-        # ── ウィンドウ設定 ──
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-        )
+        self._ui_state_store = MainWindowStateStore()
+        ui_state = self._load_ui_state()
+
+        self.setWindowTitle("SlideTasks")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet(MAIN_STYLESHEET)
 
         self._is_expanded = False
         self._animating = False
+        self._resizing = False
+        self._resize_anchor_right = 0
         self._current_mask_width = TRIGGER_WIDTH
+        self._expanded_width = ui_state.panel_width
+        self._pinned = ui_state.pinned
+        self._startup_opt_out = ui_state.startup_opt_out
+        self.app_state = AppSyncState.IDLE
+        self.current_tasklist_id = "@default"
+        google_sync.tasklist_id = self.current_tasklist_id
+        self._apply_pin_flag(self._pinned)
 
-        # ── ジオメトリ計算 ──
         screen = QApplication.primaryScreen()
+        if screen is None:
+            raise RuntimeError("プライマリ画面が見つかりません。")
+
         screen_geo = screen.availableGeometry()
         self._screen_right = screen_geo.right() + 1
         self._screen_top = screen_geo.top()
         self._screen_height = screen_geo.height()
         self._expanded_height = int(self._screen_height * WINDOW_HEIGHT_RATIO)
-        self._expanded_y = self._screen_top + (self._screen_height - self._expanded_height) // 2
-        
-        # ウィンドウサイズは常に「展開時」の最大サイズで固定
-        self.setFixedSize(EXPANDED_WIDTH, self._expanded_height)
-        
-        # 初期配置: 常に展開時の位置に固定 (右端)
-        x = self._screen_right - EXPANDED_WIDTH
-        self.move(x, self._expanded_y)
+        self._expanded_y = self._screen_top
 
-        # ── コンテナウィジェット (中身) ──
-        # これをマスクで切り取ることでスライド表現を行う
+        self.setMinimumWidth(MIN_PANEL_WIDTH)
+        self.setMaximumWidth(MAX_PANEL_WIDTH)
+        self.setFixedHeight(self._expanded_height)
+        self.resize(self._expanded_width, self._expanded_height)
+        self.move(self._screen_right - self._expanded_width, self._expanded_y)
+
         container = QWidget(self)
         container.setObjectName("container")
-        container.setFixedSize(EXPANDED_WIDTH, self._expanded_height)
-        
-        # レイアウト (コンテンツ + トグルボタン)
         container_layout = QHBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
 
-        # ── コンテンツパネル（左側）──
         self.content_panel = QWidget()
         self.content_panel.setObjectName("contentPanel")
         content_layout = QVBoxLayout(self.content_panel)
-        content_layout.setContentsMargins(0, 14, 0, 14)
+        content_layout.setContentsMargins(0, 0, 0, 14)
         content_layout.setSpacing(0)
 
-        # タスクリスト
+        self.sync_progress = QProgressBar()
+        self.sync_progress.setObjectName("syncProgress")
+        self.sync_progress.setTextVisible(False)
+        self.sync_progress.setRange(0, 0)
+        self.sync_progress.hide()
+        content_layout.addWidget(self.sync_progress)
+
+        content_layout.addSpacing(14)
+
         self.task_list = TaskListWidget()
+        self.task_list.set_read_only(False)
         self.task_list.tasks_changed.connect(self._update_progress)
-        self.task_list.task_added.connect(lambda _, __: None) # シグナル接続プレースホルダ
-        # 実際には下で SyncWorker と再接続するが、
-        # ここではレイアウト構築に集中
+        self.task_list.tasklist_changed.connect(self._on_tasklist_changed)
         content_layout.addWidget(self.task_list)
 
-        # ── プログレスセクション ──
         progress_container = QWidget()
         progress_outer = QVBoxLayout(progress_container)
         progress_outer.setContentsMargins(14, 4, 14, 0)
@@ -180,162 +160,439 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(progress_container)
         content_layout.addSpacing(8)
 
-        # ── フッターボタン群 ──
         footer_container = QWidget()
         footer_layout = QVBoxLayout(footer_container)
         footer_layout.setContentsMargins(14, 0, 14, 0)
         footer_layout.setSpacing(6)
 
-        self.log_button = QPushButton("📊  過去ログを見る")
+        self.log_button = QPushButton("完了ログを開く")
         self.log_button.setObjectName("footerButton")
         self.log_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.log_button.clicked.connect(self._show_history)
+        self.log_button.clicked.connect(self._show_completed_log)
         footer_layout.addWidget(self.log_button)
 
-        # ── 終了ボタン ──
-        self.quit_button = QPushButton("✕  アプリを終了")
+        self.quit_button = QPushButton("アプリを終了")
         self.quit_button.setObjectName("quitButton")
         self.quit_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.quit_button.clicked.connect(self._quit_app)
         footer_layout.addWidget(self.quit_button)
 
         content_layout.addWidget(footer_container)
-        
         container_layout.addWidget(self.content_panel)
 
-        # ── トグルボタン（右側）──
-        self.toggle_btn = QPushButton("◀")
+        self.error_overlay = ErrorOverlay(self.content_panel)
+        self.error_overlay.retry_clicked.connect(self._retry_sync)
+        self.error_overlay.setGeometry(self.content_panel.rect())
+
+        self.toggle_btn = QPushButton(">")
         self.toggle_btn.setObjectName("toggleButton")
         self.toggle_btn.setFixedWidth(TRIGGER_WIDTH)
-        self.toggle_btn.setSizePolicy(
-            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding
-        )
+        self.toggle_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggle_btn.clicked.connect(self._toggle_slide)
-        self.toggle_btn.setStyleSheet(_TOGGLE_IDLE)
-
+        self.toggle_btn.setStyleSheet(TOGGLE_IDLE_STYLESHEET)
         container_layout.addWidget(self.toggle_btn)
 
-        # ── レイアウト比率設定 ──
-        # コンテンツパネルが残りの幅を全て使う
-        
-        # ── スライドアニメーション（マスク幅ベース）──
+        self.setCentralWidget(container)
+
         self._slide_anim = QPropertyAnimation(self, b"slideWidth")
         self._slide_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        self._slide_anim.setDuration(ANIMATION_DURATION)
+        self._slide_anim.setDuration(ANIMATION_DURATION_MS)
         self._slide_anim.finished.connect(self._on_animation_finished)
 
-        # ── マウス追跡 ──
+        self._hover_expand_timer = QTimer(self)
+        self._hover_expand_timer.setSingleShot(True)
+        self._hover_expand_timer.timeout.connect(self._expand_from_hover)
+
         self.setMouseTracking(True)
         container.setMouseTracking(True)
         self.content_panel.setMouseTracking(True)
         self.toggle_btn.setMouseTracking(True)
 
-        # ── 日次リセットタイマー ──
         daily_reset.initialize()
         self._daily_timer = QTimer(self)
         self._daily_timer.timeout.connect(self._check_daily_reset)
-        self._daily_timer.start(DAILY_CHECK_INTERVAL)
+        self._daily_timer.start(DAILY_CHECK_INTERVAL_MS)
 
-        # ── 過去ログウィンドウ ──
-        self._history_window = None
-
-        # ── システムトレイ ──
+        self._completed_log_window: CompletedLogWindow | None = None
         self._setup_tray()
-        
-        # ── 初期状態のマスク適用 (格納状態) ──
-        self._current_mask_width = TRIGGER_WIDTH
+        self._apply_startup_policy()
+
+        self.global_hotkey_activated.connect(self._on_hotkey)
+        self._register_hotkey()
+
         self._apply_mask(TRIGGER_WIDTH)
 
-        # ── DB 初期化 & タスク読み込み ──
         db.init_db()
+        db.set_current_tasklist(self.current_tasklist_id)
         self.task_list.load_tasks()
         self._update_date_label()
         self._update_progress()
+        self._set_sync_state(AppSyncState.IDLE)
 
-        # ── Google Sync 初期化 ──
-        self.sync_thread = QThread()
+        self.sync_thread = QThread(self)
         self.sync_worker = SyncWorker()
         self.sync_worker.moveToThread(self.sync_thread)
-        
-        # シグナル接続: UI -> Worker
-        self.task_list.task_added.connect(self.sync_worker.push_add)
-        self.task_list.task_toggled.connect(self.sync_worker.push_toggle)
-        self.task_list.task_deleted.connect(self.sync_worker.push_delete)
 
-        # シグナル接続: Worker -> UI
+        self.complete_with_undo = CompleteWithUndoUseCase(self._commit_local_completion, undo_ms=2000)
+        self.complete_with_undo.committed.connect(self._on_completion_committed)
+
+        # UI thread -> worker thread requests.
+        self.request_initial_sync.connect(self.sync_worker.initial_sync)
+        self.request_poll_sync.connect(self.sync_worker.poll_tasks)
+        self.request_add_task.connect(self.sync_worker.push_add_request)
+        self.request_update_task.connect(self.sync_worker.push_update_details)
+        self.request_toggle_task.connect(self.sync_worker.push_toggle)
+
+        # Task list intents from widgets.
+        self.task_list.task_create_requested.connect(self._on_task_create_requested)
+        self.task_list.task_toggled.connect(self._on_task_toggle_requested)
+        self.task_list.task_updated.connect(self._on_task_update_requested)
+        self.task_list.task_completion_requested.connect(self._queue_completion_with_undo)
+        self.task_list.task_completion_undo.connect(self._cancel_completion_with_undo)
+        self.task_list.refresh_requested.connect(self._on_manual_refresh)
+
+        # Worker thread -> UI thread updates.
         self.sync_worker.data_changed.connect(self._on_remote_data_changed)
-        
-        self.sync_thread.start()
-        
-        # 初回同期 (スレッド内で実行)
-        QTimer.singleShot(0, self.sync_worker.initial_sync)
-        
-        # 定期ポーリング (60秒)
-        self.poll_timer = QTimer(self)
-        self.poll_timer.timeout.connect(self.sync_worker.poll_tasks)
-        self.poll_timer.start(60_000)
+        self.sync_worker.sync_finished.connect(self._on_sync_finished)
+        self.sync_worker.sync_error.connect(self._on_sync_error)
+        self.sync_worker.offline_mode.connect(self._on_offline_mode)
+        self.sync_worker.tasklists_loaded.connect(self._on_tasklists_loaded)
 
+        self.sync_thread.start()
+        self._start_initial_sync()
+
+        self.poll_timer = QTimer(self)
+        self.poll_timer.timeout.connect(self._poll_if_allowed)
+        self.poll_timer.start(POLL_INTERVAL_MS)
+
+    def _register_hotkey(self):
+        try:
+            import keyboard
+        except ImportError:
+            logging.warning("keyboard package is not available. Global hotkey is disabled.")
+            return
+
+        try:
+            keyboard.add_hotkey("ctrl+shift+space", self.global_hotkey_activated.emit)
+        except Exception:
+            logging.exception("Failed to register global hotkey.")
+
+    def _unregister_hotkey(self):
+        try:
+            import keyboard
+        except ImportError:
+            return
+
+        try:
+            if hasattr(keyboard, "unhook_all_hotkeys"):
+                keyboard.unhook_all_hotkeys()
+            else:
+                keyboard.unhook_all()
+        except Exception:
+            pass
+
+    def _on_hotkey(self):
+        if self._is_expanded:
+            if self.isActiveWindow():
+                self._toggle_slide()
+            else:
+                self.activateWindow()
+                self.task_list.setFocus()
+            return
+
+        self.activateWindow()
+        self._toggle_slide()
+
+    def closeEvent(self, event):
+        self._unregister_hotkey()
+        self._save_ui_state()
+        if hasattr(self, "_tray_controller"):
+            self._tray_controller.hide()
+
+        if hasattr(self, "poll_timer"):
+            self.poll_timer.stop()
+        if hasattr(self, "_daily_timer"):
+            self._daily_timer.stop()
+        if hasattr(self, "_hover_expand_timer"):
+            self._hover_expand_timer.stop()
+
+        if hasattr(self, "sync_thread"):
+            self.sync_thread.quit()
+            self.sync_thread.wait(1500)
+
+        super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "error_overlay"):
+            self.error_overlay.setGeometry(self.content_panel.rect())
+
+    def _start_initial_sync(self):
+        if self.app_state == AppSyncState.BLOCKING_ERROR:
+            return
+        self._set_sync_state(AppSyncState.SYNCING)
+        QTimer.singleShot(0, self.request_initial_sync.emit)
+
+    def _poll_if_allowed(self):
+        if self.app_state in {AppSyncState.BLOCKING_ERROR, AppSyncState.SYNCING}:
+            return
+        self._set_sync_state(AppSyncState.SYNCING)
+        self.request_poll_sync.emit()
+
+    @pyqtSlot()
     def _on_remote_data_changed(self):
-        """バックグラウンド同期で変更があった場合、UIを更新"""
-        # 現在の入力中などでなければリロード推奨
-        # ただし、入力中にリロードすると入力内容が消える恐れがあるが、
-        # TaskListWidget.load_tasks は input_field をクリアしないので大丈夫そう。
         self.task_list.load_tasks()
         self._update_progress()
 
+    @pyqtSlot(object, str)
+    def _on_tasklists_loaded(self, tasklists: object, selected_tasklist_id: str):
+        items = list(tasklists) if isinstance(tasklists, list) else []
+        if not items:
+            return
+
+        ids = {item.get("id") for item in items}
+        if self.current_tasklist_id not in ids:
+            first_id = items[0].get("id")
+            if first_id:
+                self.current_tasklist_id = first_id
+                google_sync.tasklist_id = first_id
+        elif selected_tasklist_id in ids:
+            self.current_tasklist_id = selected_tasklist_id
+
+        db.set_current_tasklist(self.current_tasklist_id)
+        self.task_list.set_tasklists(items, self.current_tasklist_id)
+
+    @pyqtSlot(str)
+    def _on_tasklist_changed(self, tasklist_id: str):
+        if not tasklist_id or tasklist_id == self.current_tasklist_id:
+            return
+
+        self.current_tasklist_id = tasklist_id
+        google_sync.tasklist_id = tasklist_id
+        db.set_current_tasklist(tasklist_id)
+        self.task_list.load_tasks()
+        self._update_progress()
+        self._on_manual_refresh()
+
+        if self._completed_log_window and self._completed_log_window.isVisible():
+            self._completed_log_window.refresh_logs()
+
+    @pyqtSlot(int)
+    def _queue_completion_with_undo(self, task_id: int):
+        self.complete_with_undo.queue(str(task_id))
+
+    @pyqtSlot(str, object)
+    def _on_task_create_requested(self, title: str, due_date: object):
+        if self.app_state in {AppSyncState.BLOCKING_ERROR, AppSyncState.SYNCING, AppSyncState.OFFLINE_READONLY}:
+            return
+        due_text = due_date if isinstance(due_date, str) else ""
+        self._set_sync_state(AppSyncState.SYNCING)
+        self.request_add_task.emit(title, due_text)
+
+    @pyqtSlot(int, str, object, str)
+    def _on_task_update_requested(self, task_id: int, title: str, due_date: object, notes: str):
+        if self.app_state in {AppSyncState.BLOCKING_ERROR, AppSyncState.SYNCING, AppSyncState.OFFLINE_READONLY}:
+            return
+        self._set_sync_state(AppSyncState.SYNCING)
+        self.request_update_task.emit(task_id, title, due_date, notes)
+
+    @pyqtSlot(int, bool)
+    def _on_task_toggle_requested(self, task_id: int, is_done: bool):
+        if self.app_state in {AppSyncState.BLOCKING_ERROR, AppSyncState.SYNCING, AppSyncState.OFFLINE_READONLY}:
+            return
+        self._set_sync_state(AppSyncState.SYNCING)
+        self.request_toggle_task.emit(task_id, is_done)
+
+    @pyqtSlot(int)
+    def _cancel_completion_with_undo(self, task_id: int):
+        self.complete_with_undo.cancel(str(task_id))
+
+    def _commit_local_completion(self, task_id: str) -> bool:
+        try:
+            task_id_int = int(task_id)
+        except ValueError:
+            return False
+        return self.task_list.finalize_completion(task_id_int)
+
+    @pyqtSlot(str)
+    def _on_completion_committed(self, task_id: str):
+        try:
+            task_id_int = int(task_id)
+        except ValueError:
+            return
+
+        if self.app_state not in {AppSyncState.BLOCKING_ERROR, AppSyncState.OFFLINE_READONLY}:
+            self._set_sync_state(AppSyncState.SYNCING)
+            self.request_toggle_task.emit(task_id_int, True)
+        self._update_progress()
+
+        if self._completed_log_window and self._completed_log_window.isVisible():
+            self._completed_log_window.refresh_logs()
+
+    @pyqtSlot()
+    def _on_sync_finished(self):
+        if self.app_state == AppSyncState.SYNCING:
+            self._set_sync_state(AppSyncState.IDLE)
+
+    def _on_manual_refresh(self):
+        if self.app_state in {AppSyncState.BLOCKING_ERROR, AppSyncState.SYNCING}:
+            return
+        self._set_sync_state(AppSyncState.SYNCING)
+        self.request_poll_sync.emit()
+
+    @pyqtSlot(str)
+    def _on_sync_error(self, error_msg: str):
+        self.task_list.load_tasks()
+        self._update_progress()
+        self._set_sync_state(AppSyncState.BLOCKING_ERROR, error_msg)
+
+    @pyqtSlot()
+    def _on_offline_mode(self):
+        self.task_list.load_tasks()
+        self._update_progress()
+        self._set_sync_state(AppSyncState.OFFLINE_READONLY, "オフラインモード: 閲覧専用")
+
+    def _retry_sync(self):
+        self.error_overlay.clear()
+        self._set_sync_state(AppSyncState.IDLE)
+        self._on_manual_refresh()
+
+    def _set_sync_state(self, state: AppSyncState, message: str = ""):
+        # Centralized UI mode switch. Keep all interactive-state toggles here
+        # so OFFLINE/BLOCKING/SYNCING transitions are predictable.
+        self.app_state = state
+
+        if state == AppSyncState.SYNCING:
+            self.sync_progress.show()
+            self.task_list.refresh_btn.setEnabled(False)
+            self.task_list.refresh_btn.setToolTip("同期中...")
+            self.task_list.set_read_only(True)
+            self.task_list.set_dimmed(False)
+            self.log_button.setEnabled(False)
+            self.error_overlay.clear()
+            return
+
+        if state == AppSyncState.OFFLINE_READONLY:
+            self.sync_progress.hide()
+            self.task_list.refresh_btn.setEnabled(False)
+            self.task_list.refresh_btn.setToolTip(message or "オフライン閲覧専用モード")
+            self.task_list.set_read_only(True)
+            self.task_list.set_dimmed(True)
+            self.log_button.setEnabled(False)
+            self.error_overlay.clear()
+            return
+
+        if state == AppSyncState.BLOCKING_ERROR:
+            self.sync_progress.hide()
+            self.task_list.refresh_btn.setEnabled(False)
+            self.task_list.refresh_btn.setToolTip("通信エラー")
+            self.task_list.set_read_only(True)
+            self.task_list.set_dimmed(False)
+            self.log_button.setEnabled(False)
+            self.error_overlay.show_error(message or "通信エラーが発生しました。")
+            return
+
+        self.sync_progress.hide()
+        self.task_list.refresh_btn.setEnabled(True)
+        self.task_list.refresh_btn.setToolTip("Google Tasksと同期")
+        self.task_list.set_read_only(False)
+        self.task_list.set_dimmed(False)
+        self.log_button.setEnabled(True)
+        self.error_overlay.clear()
+
     def _apply_mask(self, visible_width: int):
-        """ウィンドウの表示領域を右端から visible_width 分だけに切り取る"""
-        # 右端を基準にするので、左端のX座標は (EXPANDED_WIDTH - visible_width)
-        x = EXPANDED_WIDTH - visible_width
+        # The window always stays full-width geometrically.
+        # A dynamic mask reveals only the right-side slice for the slide effect.
+        visible_width = max(1, min(visible_width, self.width()))
+        x = self.width() - visible_width
         rect = QRegion(x, 0, visible_width, self.height())
         self.setMask(rect)
         self._current_mask_width = visible_width
 
-    # ━━━━ pyqtProperty: slideWidth（マスクアニメーション用）━━━━
     def _get_slide_width(self) -> int:
         return self._current_mask_width
 
-    def _set_slide_width(self, w: int):
-        self._apply_mask(w)
+    def _set_slide_width(self, width: int):
+        self._apply_mask(width)
 
     slideWidth = pyqtProperty(int, fget=_get_slide_width, fset=_set_slide_width)
 
-    # ━━━━ 廃止: 位置計算 (固定のため不要) ━━━━
+    def _is_on_resize_edge(self, x_pos: int) -> bool:
+        return self._is_expanded and not self._animating and x_pos <= RESIZE_MARGIN
 
-    # ━━━━ ホバー: 矢印のスタイル切替 ━━━━
+    def mousePressEvent(self, event):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._is_on_resize_edge(int(event.position().x()))
+        ):
+            self._resizing = True
+            self._resize_anchor_right = self.geometry().right() + 1
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._resizing:
+            mouse_x = int(event.globalPosition().x())
+            new_width = self._resize_anchor_right - mouse_x
+            new_width = max(MIN_PANEL_WIDTH, min(MAX_PANEL_WIDTH, new_width))
+            self._expanded_width = new_width
+            self.setGeometry(self._resize_anchor_right - new_width, self.y(), new_width, self.height())
+            self._apply_mask(new_width if self._is_expanded else TRIGGER_WIDTH)
+            event.accept()
+            return
+
+        if self._is_on_resize_edge(int(event.position().x())):
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif self.cursor().shape() == Qt.CursorShape.SizeHorCursor:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._resizing:
+            self._resizing = False
+            self.unsetCursor()
+            self._save_ui_state()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def enterEvent(self, event):
-        """マウスがウィンドウに入った → 矢印を明るく"""
         super().enterEvent(event)
         if not self._is_expanded and not self._animating:
-            self.toggle_btn.setStyleSheet(_TOGGLE_HOVER)
+            self.toggle_btn.setStyleSheet(TOGGLE_HOVER_STYLESHEET)
+            self._hover_expand_timer.start(HOVER_EXPAND_DELAY_MS)
 
     def leaveEvent(self, event):
-        """マウスがウィンドウから出た → 矢印を薄く"""
         super().leaveEvent(event)
         if not self._is_expanded and not self._animating:
-            self.toggle_btn.setStyleSheet(_TOGGLE_IDLE)
+            self.toggle_btn.setStyleSheet(TOGGLE_IDLE_STYLESHEET)
+            self._hover_expand_timer.stop()
 
-    # ━━━━ スライドアニメーション ━━━━
+    def _expand_from_hover(self):
+        if self._is_expanded or self._animating:
+            return
+        self._toggle_slide()
+
     def _toggle_slide(self):
         if self._animating:
             return
-        self._animating = True
 
+        self._animating = True
         if self._is_expanded:
-            # 格納
-            self.toggle_btn.setText("◀")
-            self._slide_anim.setStartValue(EXPANDED_WIDTH)
+            self.toggle_btn.setText(">")
+            self._slide_anim.setStartValue(self.width())
             self._slide_anim.setEndValue(TRIGGER_WIDTH)
         else:
-            # 展開
-            self.toggle_btn.setStyleSheet(_TOGGLE_EXPANDED)
-            self.toggle_btn.setText("✕")
+            self.toggle_btn.setStyleSheet(TOGGLE_EXPANDED_STYLESHEET)
+            self.toggle_btn.setText("×")
             self.task_list.load_tasks()
             self._update_date_label()
-            
+            self._on_manual_refresh()
             self._slide_anim.setStartValue(TRIGGER_WIDTH)
-            self._slide_anim.setEndValue(EXPANDED_WIDTH)
+            self._slide_anim.setEndValue(self.width())
 
         self._slide_anim.start()
 
@@ -344,13 +601,12 @@ class MainWindow(QMainWindow):
         self._animating = False
 
         if not self._is_expanded:
-            # 格納完了
-            self.toggle_btn.setStyleSheet(_TOGGLE_IDLE)
-        else:
-            # 展開完了 → フォーカスを入力欄に
-            self.task_list.input_field.setFocus()
+            self.toggle_btn.setStyleSheet(TOGGLE_IDLE_STYLESHEET)
+            self._hover_expand_timer.stop()
+            return
 
-    # ━━━━ フォーカスアウトで格納 ━━━━
+        self.task_list.setFocus()
+
     def changeEvent(self, event):
         super().changeEvent(event)
         if (
@@ -360,321 +616,128 @@ class MainWindow(QMainWindow):
             and not self._animating
         ):
             active = QApplication.activeWindow()
-            if active and isinstance(active, HistoryWindow):
+            if active and isinstance(active, CompletedLogWindow):
                 return
             self._toggle_slide()
 
-    # ━━━━ プログレスバー更新 ━━━━
     def _update_progress(self):
         total, done = db.get_today_stats()
         pct = int(done / total * 100) if total > 0 else 0
+
         self.progress_bar.setValue(pct)
         self.progress_pct_label.setText(f"{pct}%")
         if pct >= 100:
-            self.progress_pct_label.setStyleSheet(
-                "color: #10b981; font-size: 20px; font-weight: 700;"
-            )
+            self.progress_pct_label.setStyleSheet("color: #10b981; font-size: 20px; font-weight: 700;")
         else:
-            self.progress_pct_label.setStyleSheet(
-                "color: #a78bfa; font-size: 20px; font-weight: 700;"
-            )
+            self.progress_pct_label.setStyleSheet("color: #a78bfa; font-size: 20px; font-weight: 700;")
 
-    # ━━━━ 日付ラベル ━━━━
     def _update_date_label(self):
         today = date.today()
         weekdays = ["月", "火", "水", "木", "金", "土", "日"]
-        wd = weekdays[today.weekday()]
-        self.task_list.update_date_label(
-            f"{today.strftime('%Y/%m/%d')} ({wd})"
-        )
+        weekday = weekdays[today.weekday()]
+        self.task_list.update_date_label(f"{today.strftime('%Y/%m/%d')} ({weekday})")
 
-    # ━━━━ 日次リセット ━━━━
     def _check_daily_reset(self):
         if daily_reset.check_and_reset():
             self.task_list.load_tasks()
             self._update_progress()
             self._update_date_label()
 
-    # ━━━━ 過去ログ ━━━━
-    def _show_history(self):
-        if self._history_window is None:
-            self._history_window = HistoryWindow()
-        self._history_window.show()
-        self._history_window.raise_()
-        self._history_window.activateWindow()
+    def keyPressEvent(self, event):
+        if self._is_expanded and event.key() in {
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+            Qt.Key.Key_Space,
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+        }:
+            self.task_list.keyPressEvent(event)
+            if event.isAccepted():
+                return
+        super().keyPressEvent(event)
 
-    # ━━━━ システムトレイ ━━━━
-    def _create_tray_icon(self) -> QIcon:
-        size = 64
-        pixmap = QPixmap(size, size)
-        pixmap.fill(QColor(0, 0, 0, 0))
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(QBrush(QColor("#8b5cf6")))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(4, 4, size - 8, size - 8, 14, 14)
-        pen = QPen(QColor("#ffffff"))
-        pen.setWidth(5)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.drawLine(18, 33, 28, 43)
-        painter.drawLine(28, 43, 46, 22)
-        painter.end()
-        return QIcon(pixmap)
+    def _show_completed_log(self):
+        if self._completed_log_window is None:
+            self._completed_log_window = CompletedLogWindow(
+                tasklist_provider=lambda: self.current_tasklist_id,
+                parent=self,
+            )
+
+        self._completed_log_window.refresh_logs()
+        self._completed_log_window.show()
+        self._completed_log_window.raise_()
+        self._completed_log_window.activateWindow()
 
     def _setup_tray(self):
-        self._tray_icon = QSystemTrayIcon(self)
-        self._tray_icon.setIcon(self._create_tray_icon())
-        self._tray_icon.setToolTip("SlideTasks")
-
-        tray_menu = QMenu()
-        tray_menu.setStyleSheet("""
-            QMenu {
-                background-color: #1e1e33;
-                color: #f1f0f7;
-                border: 1px solid #2a2a45;
-                border-radius: 8px;
-                padding: 6px 2px;
-                font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
-                font-size: 13px;
-            }
-            QMenu::item {
-                padding: 8px 24px 8px 16px;
-                border-radius: 4px;
-                margin: 1px 4px;
-            }
-            QMenu::item:selected {
-                background-color: rgba(139, 92, 246, 0.2);
-                color: #a78bfa;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #2a2a45;
-                margin: 4px 12px;
-            }
-        """)
-
-        toggle_action = QAction("📋  パネルを開く", self)
-        toggle_action.triggered.connect(self._toggle_slide)
-        tray_menu.addAction(toggle_action)
-
-        history_action = QAction("📊  過去ログ", self)
-        history_action.triggered.connect(self._show_history)
-        tray_menu.addAction(history_action)
-
-        tray_menu.addSeparator()
-
-        self._startup_action = QAction(self)
-        self._update_startup_action_text()
-        self._startup_action.triggered.connect(self._toggle_startup)
-        tray_menu.addAction(self._startup_action)
-
-        tray_menu.addSeparator()
-
-        quit_action = QAction("✕  終了", self)
-        quit_action.triggered.connect(self._quit_app)
-        tray_menu.addAction(quit_action)
-
-        self._tray_icon.setContextMenu(tray_menu)
-        self._tray_icon.activated.connect(self._on_tray_activated)
-        self._tray_icon.show()
-
-    def _on_tray_activated(self, reason):
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self._toggle_slide()
+        self._tray_controller = TrayController(
+            parent=self,
+            callbacks=TrayCallbacks(
+                toggle=self._toggle_slide,
+                show_completed_log=self._show_completed_log,
+                set_pin_mode=self._set_pin_mode,
+                toggle_startup=self._toggle_startup,
+                quit_app=self._quit_app,
+            ),
+            pinned=self._pinned,
+            startup_enabled=startup.is_registered(),
+        )
+        self._tray_controller.show()
 
     def _toggle_startup(self):
         if startup.is_registered():
             startup.unregister()
+            self._startup_opt_out = True
         else:
+            startup.register()
+            self._startup_opt_out = False
+        self._update_startup_action_text()
+        self._save_ui_state()
+
+    def _apply_startup_policy(self):
+        if self._startup_opt_out:
+            self._update_startup_action_text()
+            return
+        if not startup.is_registered():
             startup.register()
         self._update_startup_action_text()
 
+    def _apply_pin_flag(self, pinned: bool):
+        flags = Qt.WindowType.FramelessWindowHint
+        if pinned:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+
+    def _set_pin_mode(self, pinned: bool):
+        if self._pinned == pinned:
+            return
+
+        self._pinned = pinned
+        geometry = self.geometry()
+        self._apply_pin_flag(pinned)
+        self.show()
+        self.setGeometry(geometry)
+        self._apply_mask(self._current_mask_width)
+        if hasattr(self, "_tray_controller"):
+            self._tray_controller.set_pinned(self._pinned)
+        self._save_ui_state()
+
+    def _load_ui_state(self) -> MainWindowState:
+        return self._ui_state_store.load()
+
+    def _save_ui_state(self):
+        self._ui_state_store.save(
+            MainWindowState(
+                panel_width=self._expanded_width,
+                pinned=self._pinned,
+                startup_opt_out=self._startup_opt_out,
+            )
+        )
+
     def _update_startup_action_text(self):
-        if startup.is_registered():
-            self._startup_action.setText("⏻  スタートアップ解除")
-        else:
-            self._startup_action.setText("⏻  スタートアップに登録")
+        if hasattr(self, "_tray_controller"):
+            self._tray_controller.set_startup_enabled(startup.is_registered())
 
     def _quit_app(self):
-        self._tray_icon.hide()
+        if hasattr(self, "_tray_controller"):
+            self._tray_controller.hide()
         QApplication.quit()
-
-
-# ── 同期ワーカースレッド ──
-from PyQt6.QtCore import QThread, QObject, pyqtSignal
-from app.google_sync import google_sync
-
-class SyncWorker(QObject):
-    """Google Tasks との同期をバックグラウンドで行う"""
-    
-    # UI更新要求シグナル
-    data_changed = pyqtSignal()
-    
-    def __init__(self):
-        super().__init__()
-    
-    def initial_sync(self):
-        """起動時の同期: Google優先 + カレンダー削除同期"""
-        if not google_sync.is_available():
-            return
-            
-        # 認証 (初回など)
-        if not google_sync.authenticate():
-            return
-
-        # 2. Tasks 同期
-        self._pull_from_google()
-        self._push_missing_to_google()
-        self.data_changed.emit()
-
-    def _sync_calendar_deletions(self):
-        """カレンダーで削除されたイベントに対応するタスクを削除"""
-        pass # Discontinued
-
-    def poll_tasks(self):
-        """定期ポーリング"""
-        if not google_sync.is_available():
-            return
-        
-        # 変更があった場合のみ emit したいが、
-        # 簡易実装として pull して変更あれば DB 更新 -> data_changed
-        if self._pull_from_google():
-            self.data_changed.emit()
-
-    def push_add(self, task_id: int, title: str, due_date: str = ""):
-        """タスク追加をPush"""
-        # due_date が空文字の場合は None にする
-        d_date = due_date if due_date else None
-        gid = google_sync.add_task(title, due_date=d_date)
-        if gid:
-            db.update_google_task_id(task_id, gid)
-            
-        if gid:
-            db.update_google_task_id(task_id, gid)
-
-    def push_toggle(self, task_id: int, is_done: bool):
-        """完了状態をPush"""
-        # Google ID を取得
-        conn = db._get_connection()
-        row = conn.execute("SELECT google_task_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        conn.close()
-        
-        gid = row["google_task_id"] if row else None
-        if not gid:
-            return
-
-        if is_done:
-            google_sync.complete_task(gid)
-        else:
-            # 完了を取り消す (needsActionに戻す)
-            google_sync.reopen_task(gid) 
-
-    def push_delete(self, task_id: int, google_task_id: str):
-        """削除をPush"""
-        if google_task_id:
-            google_sync.delete_task(google_task_id)
-
-    def _pull_from_google(self) -> bool:
-        """
-        Google からタスクを取得し、ローカルDBと同期する。
-        変更があったら True を返す。
-        """
-        remote_tasks = google_sync.fetch_tasks() # list[dict(id, title, ...)]
-        if remote_tasks is None:
-            return False
-
-        changed = False
-        remote_map = {t['id']: t for t in remote_tasks}
-        
-        # 1. リモートにあるものをローカルに反映 (追加/更新)
-        # ローカルの全タスク(アクティブ)を取得
-        local_tasks = db.get_active_tasks()
-        local_map = {t['google_task_id']: t for t in local_tasks if t['google_task_id']}
-        
-        conn = db._get_connection()
-        
-        for gid, r_item in remote_map.items():
-            title = r_item['title']
-            is_completed = (r_item['status'] == 'completed')
-            
-            if gid in local_map:
-                # 既存: タイトル更新 / 完了状態同期
-                l_item = local_map[gid]
-                
-                # タイトルの同期
-                if l_item['title'] != title:
-                    conn.execute("UPDATE tasks SET title = ? WHERE google_task_id = ?", (title, gid))
-                    changed = True
-                
-                # 完了状態の同期 (Googleが完了ならローカルも完了に、逆も然り)
-                # ただし「今日完了したタスク」などはローカルに残っているので、ステータス合わせる
-                l_done = bool(l_item['is_done'])
-                if l_done != is_completed:
-                    # Googleの状態を正とする
-                    new_done = 1 if is_completed else 0
-                    completed_at = None
-                    if new_done:
-                        from datetime import datetime
-                        completed_at = datetime.now().isoformat()
-                    
-                    conn.execute(
-                        "UPDATE tasks SET is_done = ?, completed_at = ? WHERE id = ?",
-                        (new_done, completed_at, l_item['id'])
-                    )
-                    changed = True
-
-            else:
-                # 新規 (ローカルにない)
-                # ただし「完了済み」でかつ「今日作成/完了」でない古いタスクを持ってきてしまうと
-                # 過去ログ行きのはずがリストに復活してしまう可能性がある。
-                # get_active_tasks は「今日完了」or「未完了」しか返さない。
-                # Googleから取得したのは「未完了」+「直近24時間完了」。
-                # したがって、ここで追加してよい。
-                
-                # ただし、DBには「過去に完了してアーカイブされた」タスクが残っているわけではない(deleteされている)。
-                # なので単純に追加でOK。
-                # もし「昨日完了」したものがGoogleから返ってきた場合、ローカルでは「今日完了」として復活する？
-                # -> created_at は現在時刻になるので、「今日作成された完了タスク」に見える。
-                # 実用上は大きな問題ではないが、completed_at は入れておきたい。
-                
-                now_str = date.today().isoformat()
-                from datetime import datetime
-                created_at = datetime.now().isoformat()
-                completed_at = created_at if is_completed else None
-                is_done_val = 1 if is_completed else 0
-                
-                conn.execute(
-                    "INSERT INTO tasks (title, is_done, created_at, completed_at, google_task_id) VALUES (?, ?, ?, ?, ?)",
-                    (title, is_done_val, created_at, completed_at, gid)
-                )
-                changed = True
-        
-        # 2. ローカルにあってリモートにないもの (Googleで削除された -> ローカルも削除)
-        # ただし "まだ同期されていない新規ローカルタスク" (google_task_id is None) は消してはいけない
-        for gid, l_item in local_map.items():
-            if gid not in remote_map:
-                # Google側で消えている -> ローカルも削除
-                # ここで「完了タスク」が消えていたバグ対策:
-                # Google側で完了していても remote_map に入るようになったので、
-                # ここで remote_map に無い＝「本当に削除された」or「24時間以上前に完了した」
-                # 古い完了タスクはローカルからも消えて良いので、このロジックでOK。
-                conn.execute("DELETE FROM tasks WHERE id = ?", (l_item['id'],))
-                changed = True
-
-        if changed:
-            conn.commit()
-        conn.close()
-        return changed
-
-    def _push_missing_to_google(self):
-        """google_task_id がないタスクを Google にアップロード"""
-        conn = db._get_connection()
-        rows = conn.execute("SELECT * FROM tasks WHERE google_task_id IS NULL").fetchall()
-        conn.close()
-        
-        for row in rows:
-            gid = google_sync.add_task(row["title"])
-            if gid:
-                db.update_google_task_id(row["id"], gid)

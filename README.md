@@ -1,63 +1,61 @@
 # SlideTasks for Windows
 
-Windows常駐型・スライド式TODOアプリケーション。  
-画面右端に常駐し、クリックでスムーズに展開。Google Tasks連携対応。
+Google Tasks をマスターとする、Windows 向けの常駐型タスクパネルです。
+`Ctrl+Shift+Space` で右端からパネルを呼び出し、キーボード中心で操作できます。
 
-## 特徴
+## 主な機能
 
-- 📌 **常駐型**: 画面右端に常に表示（AlwaysOnTop, フレームレス）
-- 🎞️ **スライド展開**: 40px → 340px のスムーズなアニメーション
-- ✅ **タスク管理**: 追加・完了（取り消し線）・削除
-- 📊 **進捗表示**: プログレスバーで今日の達成率を可視化
-- 📅 **日次リセット**: 日付が変わると前日のログを自動保存
-- 📈 **過去ログ**: 直近30日間の達成率をグラフで確認
-- 🔗 **Google Tasks 同期**: credentials.json を配置すれば自動連携
+- 右端スライド式パネル（トレイ常駐）
+- グローバルホットキー: `Ctrl+Shift+Space`
+- Google Tasks 同期（OAuth2）
+- タスクリスト切り替え
+- サブタスクのインデント表示
+- 完了時 2 秒 Undo
+- オフライン時の読み取り専用モード
+- 完了ログ表示（期間指定）
 
-## ダウンロード & インストール
+## 設計方針
 
-1. **GitHub Releases** から最新の `SlideTasks_vX.X.zip` をダウンロードしてください。
-2. 解凍して、任意の場所に配置します。
-3. `SlideTasks.exe` を実行すれば起動します。
+- Google Tasks API を正（マスター）として扱う
+- ローカル SQLite は UI キャッシュ用途に限定
+- タスク削除はアプリ UI から提供しない（同期事故防止）
 
-## セットアップ (Google Tasks 連携)
+## セットアップ
 
-本アプリは Google Tasks と同期する機能を持っていますが、セキュリティの関係上、**認証情報は各自で用意していただく必要があります**。
-
-1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作成します。
-2. **Google Tasks API** を有効化します。
-3. **OAuth 2.0 クライアントID**（アプリケーションの種類: デスクトップアプリ）を作成します。
-4. JSON形式で認証情報をダウンロードし、ファイル名を `credentials.json` に変更します。
-5. `SlideTasks.exe` と同じフォルダ（`SlideTasks_v1.0` フォルダ内）に `credentials.json` を配置します。
-6. アプリを起動すると、初回のみブラウザが開き、Google認証を求められます。許可すると `token.json` が自動生成され、連携が開始されます。
-
-## 開発者向け (ソースコードから実行)
+1. Python 3.11+ を用意
+2. 依存をインストール
 
 ```bash
-# 1. リポジトリをクローン
-git clone https://github.com/your-username/SlideTasks.git
-cd SlideTasks
-
-# 2. 仮想環境作成 (推奨)
-python -m venv venv
-./venv/Scripts/activate
-
-# 3. 依存パッケージのインストール
 pip install -r requirements.txt
+```
 
-# 4. アプリ起動
+3. Google Cloud Console で Tasks API を有効化し、`credentials.json` を配置
+4. アプリを起動
+
+```bash
 python main.py
 ```
 
-## ファイル構成 (配布時)
+初回起動時に OAuth 画面が開き、認証後に `token.json` が生成されます。
 
-```
-SlideTasks_v1.0/
-├── SlideTasks.exe        # アプリ本体
-├── credentials.json      # [必須] 自分で配置する認証ファイル
-├── README.md             # 説明書
-└── data/                 # データ保存用 (自動生成)
+## ビルド（任意）
+
+```bash
+python build.py
 ```
 
-## ライセンス
+`dist/SlideTasks_v1.0` に実行ファイル一式を生成します。
 
-Private、つまり無いです。
+## ディレクトリ構成（主要）
+
+- `main.py`: エントリーポイント
+- `app/main_window.py`: メインウィンドウと UI 制御
+- `app/task_widget.py`: タスクリスト UI と入力周り
+- `app/sync_worker.py`: バックグラウンド同期ワーカー
+- `app/infrastructure/google/`: Google API 連携
+- `app/database.py`: ローカルキャッシュ DB
+
+## 注意
+
+- 機密情報（`credentials.json`, `token.json`）は公開しないでください。
+- ネットワーク制限下では Google API 同期に失敗し、オフライン表示になります。

@@ -11,6 +11,7 @@ build/
 # User Data / Database
 data/
 *.db
+*.log
 
 # Secrets (Never commit these!)
 credentials.json

@@ -1,16 +1,12 @@
+from __future__ import annotations
+
 import sys
 import os
 
+
 def get_base_path() -> str:
-    """
-    アプリケーションのベースパスを取得する。
-    
-    Returns:
-        str: EXE実行時はEXEのあるディレクトリ、開発時はプロジェクトルートディレクトリ
-    """
+    """Return the runtime root path for both frozen and script execution."""
     if getattr(sys, 'frozen', False):
-        # EXE実行時
         return os.path.dirname(sys.executable)
-    else:
-        # スクリプト実行時: このファイル (app/utils.py) の2つ上のディレクトリがルート
-        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
