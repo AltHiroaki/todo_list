@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 
+from app.domain.auth_errors import AuthRequiredError
 from app.utils import get_base_path
 
 try:
@@ -34,6 +35,12 @@ class GoogleAuthService:
         return HAS_GOOGLE_LIBS and os.path.exists(self.credentials_path)
 
     def authenticate(self) -> bool:
+        """Authenticate using stored/refreshable credentials only.
+
+        Raises:
+            AuthRequiredError: When credentials are missing or cannot be
+                refreshed and interactive re-authentication is required.
+        """
         if not self.is_available():
             logger.error("Google API libraries or credentials.json are missing.")
             return False
@@ -47,8 +54,8 @@ class GoogleAuthService:
                 if creds and creds.expired and creds.refresh_token:
                     creds.refresh(Request())
                 else:
-                    flow = InstalledAppFlow.from_client_secrets_file(self.credentials_path, self.SCOPES)
-                    creds = flow.run_local_server(port=0)
+                    # Do NOT launch browser implicitly – signal the caller.
+                    raise AuthRequiredError()
 
                 with open(self.token_path, "w", encoding="utf-8") as file:
                     file.write(creds.to_json())
@@ -56,8 +63,31 @@ class GoogleAuthService:
             self._credentials = creds
             self._service = build("tasks", "v1", credentials=creds)
             return True
+        except AuthRequiredError:
+            raise
         except Exception:
             logger.exception("Google OAuth authentication failed.")
+            return False
+
+    def run_interactive_auth(self) -> bool:
+        """Run the full OAuth browser flow.  Call ONLY from the UI thread."""
+        if not self.is_available():
+            return False
+
+        try:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                self.credentials_path, self.SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+
+            with open(self.token_path, "w", encoding="utf-8") as file:
+                file.write(creds.to_json())
+
+            self._credentials = creds
+            self._service = build("tasks", "v1", credentials=creds)
+            return True
+        except Exception:
+            logger.exception("Interactive Google OAuth authentication failed.")
             return False
 
     def get_service(self):

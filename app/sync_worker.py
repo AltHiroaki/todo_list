@@ -6,6 +6,8 @@ from datetime import datetime
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from app.domain.auth_errors import AuthRequiredError
+
 from app import database as db
 from app.application.usecases.refresh_on_show import RefreshOnShowUseCase
 from app.domain.models import AppSyncState, TaskItem
@@ -20,6 +22,7 @@ class SyncWorker(QObject):
     data_changed = pyqtSignal()
     sync_finished = pyqtSignal()
     sync_error = pyqtSignal(str)
+    auth_required = pyqtSignal(str)
     offline_mode = pyqtSignal()
     tasklists_loaded = pyqtSignal(object, str)  # list[dict], selected_tasklist_id
 
@@ -36,8 +39,13 @@ class SyncWorker(QObject):
             self.sync_finished.emit()
             return
 
-        if not google_sync.authenticate():
-            self.offline_mode.emit()
+        try:
+            if not google_sync.authenticate():
+                self.offline_mode.emit()
+                self.sync_finished.emit()
+                return
+        except AuthRequiredError as exc:
+            self.auth_required.emit(str(exc))
             self.sync_finished.emit()
             return
 

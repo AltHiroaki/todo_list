@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QThread, QTimer, Qt, pyqtProperty, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QEasingCurve, QEvent, QPropertyAnimation, QThread, QTimer, Qt, pyqtProperty, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QRegion
 from PyQt6.QtWidgets import (
     QApplication,
@@ -182,7 +182,9 @@ class MainWindow(QMainWindow):
 
         self.error_overlay = ErrorOverlay(self.content_panel)
         self.error_overlay.retry_clicked.connect(self._retry_sync)
+        self.error_overlay.reauth_clicked.connect(self._start_reauth)
         self.error_overlay.setGeometry(self.content_panel.rect())
+        self.content_panel.installEventFilter(self)
 
         self.toggle_btn = QPushButton(">")
         self.toggle_btn.setObjectName("toggleButton")
@@ -256,6 +258,7 @@ class MainWindow(QMainWindow):
         self.sync_worker.data_changed.connect(self._on_remote_data_changed)
         self.sync_worker.sync_finished.connect(self._on_sync_finished)
         self.sync_worker.sync_error.connect(self._on_sync_error)
+        self.sync_worker.auth_required.connect(self._on_auth_required)
         self.sync_worker.offline_mode.connect(self._on_offline_mode)
         self.sync_worker.tasklists_loaded.connect(self._on_tasklists_loaded)
 
@@ -327,6 +330,11 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "error_overlay"):
             self.error_overlay.setGeometry(self.content_panel.rect())
+
+    def eventFilter(self, obj, event):
+        if obj is self.content_panel and event.type() == QEvent.Type.Resize:
+            self.error_overlay.setGeometry(self.content_panel.rect())
+        return super().eventFilter(obj, event)
 
     def _start_initial_sync(self):
         if self.app_state == AppSyncState.BLOCKING_ERROR:
@@ -457,6 +465,27 @@ class MainWindow(QMainWindow):
         self.error_overlay.clear()
         self._set_sync_state(AppSyncState.IDLE)
         self._on_manual_refresh()
+
+    @pyqtSlot(str)
+    def _on_auth_required(self, msg: str):
+        """Handle authentication-required signal from sync worker."""
+        self.task_list.load_tasks()
+        self._update_progress()
+        self._set_sync_state(AppSyncState.BLOCKING_ERROR, msg)
+        self.error_overlay.show_error(msg, show_reauth=True)
+
+    def _start_reauth(self):
+        """Run interactive Google OAuth flow from UI thread."""
+        self.error_overlay.clear()
+        self._set_sync_state(AppSyncState.SYNCING)
+
+        ok = google_sync.run_interactive_auth()
+        if ok:
+            self._set_sync_state(AppSyncState.IDLE)
+            self._start_initial_sync()
+        else:
+            self._set_sync_state(AppSyncState.BLOCKING_ERROR, "再認証に失敗しました。もう一度お試しください。")
+            self.error_overlay.show_error("再認証に失敗しました。もう一度お試しください。", show_reauth=True)
 
     def _set_sync_state(self, state: AppSyncState, message: str = ""):
         # Centralized UI mode switch. Keep all interactive-state toggles here

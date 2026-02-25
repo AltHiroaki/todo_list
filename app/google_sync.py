@@ -70,5 +70,10 @@ class GoogleTaskSync:
         )
         return updated is not None
 
+    def run_interactive_auth(self) -> bool:
+        """Run the interactive OAuth browser flow (UI thread only)."""
+        return self._auth.run_interactive_auth()
+
 
 google_sync = GoogleTaskSync()
+

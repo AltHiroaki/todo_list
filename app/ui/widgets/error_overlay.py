@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
 class ErrorOverlay(QWidget):
     retry_clicked = pyqtSignal()
+    reauth_clicked = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -26,7 +27,7 @@ class ErrorOverlay(QWidget):
                 color: #cbd5e1;
                 font-size: 12px;
             }
-            QPushButton#errorRetry {
+            QPushButton#errorRetry, QPushButton#errorReauth {
                 background-color: #8b5cf6;
                 color: white;
                 border: none;
@@ -34,7 +35,7 @@ class ErrorOverlay(QWidget):
                 padding: 8px 14px;
                 font-weight: 600;
             }
-            QPushButton#errorRetry:hover {
+            QPushButton#errorRetry:hover, QPushButton#errorReauth:hover {
                 background-color: #7c3aed;
             }
             """
@@ -60,13 +61,30 @@ class ErrorOverlay(QWidget):
         self.retry_button.clicked.connect(self.retry_clicked.emit)
         layout.addWidget(self.retry_button)
 
+        self.reauth_button = QPushButton("再認証する")
+        self.reauth_button.setObjectName("errorReauth")
+        self.reauth_button.clicked.connect(self.reauth_clicked.emit)
+        self.reauth_button.setVisible(False)
+        layout.addWidget(self.reauth_button)
+
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
 
-    def show_error(self, message: str) -> None:
+    def show_error(self, message: str, *, show_reauth: bool = False) -> None:
         self.message_label.setText(message)
+        if show_reauth:
+            self.title_label.setText("認証エラー")
+            self.retry_button.setVisible(False)
+            self.reauth_button.setVisible(True)
+        else:
+            self.title_label.setText("通信エラー")
+            self.retry_button.setVisible(True)
+            self.reauth_button.setVisible(False)
         self.setVisible(True)
         self.raise_()
 
     def clear(self) -> None:
         self.setVisible(False)
+        self.retry_button.setVisible(True)
+        self.reauth_button.setVisible(False)
+
 
