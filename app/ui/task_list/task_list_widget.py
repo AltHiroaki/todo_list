@@ -23,6 +23,13 @@ from app.ui.task_list.calendar_popup import CalendarPopup
 from app.ui.task_list.icons import build_calendar_icon, build_refresh_icon
 from app.ui.task_list.task_item_widget import TaskItemWidget
 
+TASK_ACTION_BLOCKED_MODIFIERS = (
+    Qt.KeyboardModifier.ControlModifier
+    | Qt.KeyboardModifier.ShiftModifier
+    | Qt.KeyboardModifier.AltModifier
+    | Qt.KeyboardModifier.MetaModifier
+)
+
 
 class TaskListWidget(QWidget):
     """Task list pane: add input, list rendering, and keyboard-first interactions."""
@@ -443,6 +450,10 @@ class TaskListWidget(QWidget):
             self.tasklist_changed.emit(tasklist_id)
 
     def keyPressEvent(self, event):
+        if event.modifiers() & TASK_ACTION_BLOCKED_MODIFIERS:
+            super().keyPressEvent(event)
+            return
+
         key = event.key()
         if key == Qt.Key.Key_Up:
             self._move_selection(-1)

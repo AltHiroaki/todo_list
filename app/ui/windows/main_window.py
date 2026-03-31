@@ -48,6 +48,13 @@ from app.ui.windows.main_window_constants import (
 from app.ui.windows.main_window_state_store import MainWindowState, MainWindowStateStore
 from app.ui.windows.tray_controller import TrayCallbacks, TrayController
 
+TASK_NAVIGATION_BLOCKED_MODIFIERS = (
+    Qt.KeyboardModifier.ControlModifier
+    | Qt.KeyboardModifier.ShiftModifier
+    | Qt.KeyboardModifier.AltModifier
+    | Qt.KeyboardModifier.MetaModifier
+)
+
 
 class MainWindow(QMainWindow):
     """Right-edge slide panel host with tray + background sync orchestration."""
@@ -673,13 +680,17 @@ class MainWindow(QMainWindow):
             self._update_date_label()
 
     def keyPressEvent(self, event):
-        if self._is_expanded and event.key() in {
+        if (
+            self._is_expanded
+            and not (event.modifiers() & TASK_NAVIGATION_BLOCKED_MODIFIERS)
+            and event.key() in {
             Qt.Key.Key_Up,
             Qt.Key.Key_Down,
             Qt.Key.Key_Space,
             Qt.Key.Key_Return,
             Qt.Key.Key_Enter,
-        }:
+            }
+        ):
             self.task_list.keyPressEvent(event)
             if event.isAccepted():
                 return
