@@ -20,15 +20,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app import daily_reset
-from app import startup
-from app import database as db
+from app.auth.google_sync import google_sync
 from app.application.usecases.complete_with_undo import CompleteWithUndoUseCase
 from app.domain.models import AppSyncState
-from app.google_sync import google_sync
-from app.styles import MAIN_STYLESHEET
-from app.sync_worker import SyncWorker
+from app.infrastructure.storage import database as db
+from app.platform import startup
+from app.services import daily_reset
+from app.services.sync_worker import SyncWorker
 from app.ui.task_list import TaskListWidget
+from app.ui.styles import MAIN_STYLESHEET
 from app.ui.widgets.error_overlay import ErrorOverlay
 from app.ui.windows.completed_log_window import CompletedLogWindow
 from app.ui.windows.main_window_constants import (

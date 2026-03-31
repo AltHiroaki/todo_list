@@ -4,7 +4,7 @@ import json
 import os
 from datetime import datetime
 
-from app.utils import get_base_path
+from app.core.utils import get_base_path
 
 
 class JsonCache:
@@ -36,4 +36,3 @@ class JsonCache:
     def _path(self, name: str) -> str:
         safe_name = name.replace("/", "_")
         return os.path.join(self.cache_dir, f"{safe_name}.json")
-

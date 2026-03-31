@@ -173,15 +173,17 @@ todo_list/
 ├── credentials.json         # Google OAuth 認証情報（各自用意）
 ├── app/
 │   ├── __init__.py
-│   ├── main_window.py       # メインウィンドウ + スライドアニメーション + トレイ
-│   ├── task_widget.py       # タスク入力欄 + タスクリストUI + カレンダー
-│   ├── history_window.py    # 過去ログウィンドウ（グラフ + カード + 詳細）
-│   ├── database.py          # SQLite CRUD + 集計ロジック
-│   ├── google_sync.py       # Google Tasks API ラッパー
-│   ├── daily_reset.py       # 日次リセット処理
-│   ├── startup.py           # Windows スタートアップ登録
-│   ├── styles.py            # ダークテーマ定義（QSS + カラーパレット）
-│   └── utils.py             # ユーティリティ
+│   ├── auth/                # 認証関連の入口と例外
+│   ├── core/                # 共通ユーティリティ
+│   ├── services/            # 同期ワーカーと日次処理
+│   ├── platform/            # Windows 固有連携
+│   ├── ui/                  # 画面とスタイル
+│   ├── infrastructure/
+│   │   ├── google/          # Google Tasks 連携
+│   │   ├── cache/           # JSON キャッシュ
+│   │   └── storage/         # SQLite 永続化
+│   ├── application/         # ユースケース
+│   └── domain/              # モデルと列挙型
 └── data/
     └── slidetasks.db        # SQLite DB（自動生成）
 ```

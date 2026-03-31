@@ -10,7 +10,7 @@ import os
 import sqlite3
 from datetime import date, datetime
 
-from app.utils import get_base_path
+from app.core.utils import get_base_path
 
 DB_DIR = os.path.join(get_base_path(), "data")
 DB_PATH = os.path.join(DB_DIR, "slidetasks.db")

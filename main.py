@@ -11,8 +11,8 @@ import sys
 
 from PyQt6.QtWidgets import QApplication
 
-from app.main_window import MainWindow
-from app.utils import get_base_path
+from app.core.utils import get_base_path
+from app.ui.windows.main_window import MainWindow
 
 
 def setup_logging() -> None:

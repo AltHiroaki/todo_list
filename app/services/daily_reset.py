@@ -4,7 +4,7 @@ SlideTasks — 日次リセット処理
 """
 
 from datetime import date, timedelta
-from app import database as db
+from app.infrastructure.storage import database as db
 
 
 _last_known_date: date | None = None

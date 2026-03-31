@@ -49,11 +49,12 @@ python build.py
 ## ディレクトリ構成（主要）
 
 - `main.py`: エントリーポイント
-- `app/main_window.py`: メインウィンドウと UI 制御
-- `app/task_widget.py`: タスクリスト UI と入力周り
-- `app/sync_worker.py`: バックグラウンド同期ワーカー
+- `app/ui/windows/main_window.py`: メインウィンドウと UI 制御
+- `app/ui/task_list/`: タスクリスト UI と入力周り
+- `app/services/sync_worker.py`: バックグラウンド同期ワーカー
+- `app/auth/`: 認証関連の入口
 - `app/infrastructure/google/`: Google API 連携
-- `app/database.py`: ローカルキャッシュ DB
+- `app/infrastructure/storage/database.py`: ローカルキャッシュ DB
 
 ## 注意
 

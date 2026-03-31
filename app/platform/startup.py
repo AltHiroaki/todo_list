@@ -34,7 +34,7 @@ def register():
             r"Software\Microsoft\Windows\CurrentVersion\Run",
             0, winreg.KEY_SET_VALUE,
         )
-        from app.utils import get_base_path
+        from app.core.utils import get_base_path
         script = os.path.abspath(
             os.path.join(get_base_path(), "main.py")
         )

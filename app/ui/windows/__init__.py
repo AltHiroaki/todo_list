@@ -1,6 +1,7 @@
 """UI window modules."""
 
 from app.ui.windows.completed_log_window import CompletedLogWindow
+from app.ui.windows.main_window import MainWindow
 from app.ui.windows.main_window_constants import (
     ANIMATION_DURATION_MS,
     DAILY_CHECK_INTERVAL_MS,
@@ -32,6 +33,7 @@ __all__ = [
     "TRIGGER_WIDTH",
     "WINDOW_HEIGHT_RATIO",
     "CompletedLogWindow",
+    "MainWindow",
     "MainWindowState",
     "MainWindowStateStore",
     "TrayCallbacks",

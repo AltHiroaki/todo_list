@@ -9,4 +9,4 @@ def get_base_path() -> str:
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
 
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app import database as db
+from app.infrastructure.storage import database as db
 from app.ui.task_list.calendar_popup import CalendarPopup
 from app.ui.task_list.icons import build_calendar_icon, build_refresh_icon
 from app.ui.task_list.task_item_widget import TaskItemWidget

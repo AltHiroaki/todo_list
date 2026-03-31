@@ -76,4 +76,3 @@ class GoogleTaskSync:
 
 
 google_sync = GoogleTaskSync()
-
