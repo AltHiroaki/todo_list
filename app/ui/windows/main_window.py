@@ -33,6 +33,7 @@ from app.ui.widgets.error_overlay import ErrorOverlay
 from app.ui.windows.completed_log_window import CompletedLogWindow
 from app.ui.windows.main_window_constants import (
     ANIMATION_DURATION_MS,
+    COLLAPSED_TOP_SAFE_MARGIN,
     DAILY_CHECK_INTERVAL_MS,
     HOVER_EXPAND_DELAY_MS,
     MAX_PANEL_WIDTH,
@@ -542,8 +543,15 @@ class MainWindow(QMainWindow):
         # A dynamic mask reveals only the right-side slice for the slide effect.
         visible_width = max(1, min(visible_width, self.width()))
         x = self.width() - visible_width
-        rect = QRegion(x, 0, visible_width, self.height())
-        self.setMask(rect)
+        if visible_width <= TRIGGER_WIDTH:
+            # Keep the top-right window controls of maximized apps clickable.
+            safe_top = min(COLLAPSED_TOP_SAFE_MARGIN, self.height())
+            lower_height = max(0, self.height() - safe_top)
+            region = QRegion(x, safe_top, visible_width, lower_height)
+        else:
+            region = QRegion(x, 0, visible_width, self.height())
+
+        self.setMask(region)
         self._current_mask_width = visible_width
 
     def _get_slide_width(self) -> int:
